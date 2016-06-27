@@ -1,0 +1,137 @@
+
+我们都知道JVM内存由几个部分组成：堆、方法区、栈、程序计数器、本地方法栈
+JVM垃圾回收仅仅针对公共内存区域即：堆和方法区进行。
+本文主要讨论两点，一是垃圾回收策略，二是调优的方法。
+
+一、垃圾回收机制
+
+1.1 分代管理
+将堆和方法区按照对象不同年龄进行分代：
+u  堆中会频繁创建对象，基于一种分代的思想，按照对象存活时间将堆划分为新生代和旧生代两部分，我们不能一次垃圾回收新生代存活的对象就放入旧生代，而是要经过几次GC后还存活的对象，我们才放入旧生代，所以我们又把新生代再次划分为Eden区和两个Survivor区，让对象创建在Eden区，然后在两个Survivor之间反复复制，最后仍然存活的对象才复制到旧生代中。
+u  方法区存放的是常量、加载的字节码文件信息等，信息相对稳定。因为不会频繁创建对象，所以不需要分代，直接GC即可。
+ 
+由此我们JVM垃圾回收要扫描的范围是：
+
+
+注：图片来自网络
+ 
+新生代：
+1.      所有新对象创建发生在Eden区，Eden区满后触发新生代上的minor GC，将Eden区和非空闲Survivor区存活对象复制到另一个空闲的Survivor区中。
+2.      永远保证一个Survivor是空的，新生代minor GC就是在两个Survivor区之间相互复制存活对象，直到Survivor区满为止。
+ 
+旧生代：
+1.      Eden区满后触发minor GC将存活对象复制到Survivor区，Survivor区满后触发minor GC将存活对象复制到旧生代。
+2.      经过新生代的两个Survivor之间多次复制，仍然存活下来的对象就是年龄相对比较老的，就可以放入到旧生代了，随着时间推移，如果旧生代也满了，将触发Full GC，针对整个堆（包括新生代、旧生代和持久代）进行垃圾回收。
+ 
+持久代：
+持久代如果满，将触发Full GC
+
+1.2 垃圾回收
+要执行gc关键在于两点，一是检测出垃圾对象，二是释放垃圾对象所占用的空间。
+
+1.2.1 检测垃圾对象
+检测出垃圾对象一般有两种算法：
+1、 引用计数法
+2、 可达性分析
+引用计数法因为无法检测对象之间相互循环引用的问题，基本没有被采用。现在主流的语言的垃圾收集中检测垃圾对象主要还是“可达性分析”方法，下面也主要介绍JVM可达性分析方法检测垃圾对象。
+ 
+“可达性分析”算法描述？
+通过一系列的名为“GC Root”的对象作为起点，从这些节点向下搜索，搜索所走过的路径称为引用链(Reference Chain)，当一个对象到GC Root没有任何引用链相连时，则该对象不可达，该对象是不可使用的，垃圾收集器将回收其所占的内存。所以JVM判断对象需要存活的原则是：能够被一个根对象到达的对象。
+ 
+什么是能够到达呢？
+就是对象A中引用了对象B，那么就称A到B可达。
+ 
+GCRoot对象集合？
+a. java虚拟机栈(栈帧中的本地变量表)中的引用的对象。
+b.方法区中的类静态属性引用的对象。
+c.方法区中的常量引用的对象。
+d.本地方法栈中JNI本地方法的引用对象。
+
+1.2.2 释放空间
+1、垃圾回收算法
+前面已经介绍了如何检测出垃圾对象，在检测出垃圾对象之后，需要按照特定的垃圾回收算法进行内存回收，常见的垃圾回收算法包括：
+u  复制(Copying)
+u  标记-清除(Mark-Sweep)
+u  标记-整理(Mark-Compact)
+u  分代(Generational Collection)，借助前面三种算法实现
+这里就不一一详述，感兴趣可以自行百度。
+
+2、垃圾收集器实现
+上面算法都是理论性的东西，Java虚拟机规范没有规定垃圾收集器具体如何实现，因此不同厂商、不同版本虚拟机提供的垃圾收集器可能有所差异。下面列举HotSpot(Sun JDK和Open JDK自带)虚拟机提供的六种垃圾收集器实现：
+收集器名称	应用目标	采用算法	引入版本	运行方式
+Serial	新生代	复制算法	Jdk1.3.1前	串行，单线程
+ParNew	新生代	复制算法	
+并行，多线程
+Parallel Scavenge	新生代	复制算法	Jdk1.4	并行，多线程
+Serial Old	旧生代	标记-整理	
+串行，单线程
+Parallel Old	旧生代	标记-整理	Jdk1.6	并行，多线程
+CMS	旧生代	标记-清除	Jdk1.5	并发，多线程
+并行(Parallel)：多条垃圾收集线程并行工作，而用户线程仍处于等待状态
+并发(Concurrent)：垃圾收集线程与用户线程一段时间内同时工作(不是并行，而是交替执行)
+ 
+总结：
+1、  两个串行收集器、三个并行收集器、一个并发收集器。
+2、  ParNew收集器是Serial的多线程版本
+3、  Serial Old收集器是Serial收集器的旧生代版本。
+4、  Parallel Scavenge收集器以吞吐量为目标，适合在后台运算而不需要太多交互的任务。
+5、  Parallel Old收集器是Parallel Scavenge的旧生代版本。
+6、  Parallel Scavenge收集器和Parallel Old收集器是名副其实的“吞吐量优先”组合。
+7、  除CMS外，其他收集器工作时都需要暂停其他所有线程，CMS是第一款真正意义上的并发(Concurrent)收集器，第一次实现了让垃圾收集器线程与用户线程同时工作，是一款以最短停顿时间为目标的收集器，适合交互性较多的场景，这也是与Parallel Scavenge/Parallel Old吞吐量优先组合的区别。
+
+8、  新生代因为回收留下的对象少，所以采用标记-复制法。
+9、  旧生代因为回收留下的对象多，所以采用标记-清除/标记-整理算法。
+
+3、选择所需垃圾收集器
+虚拟机提供了参数，以便用户根据自己的需求设置所需的垃圾收集器：
+JVM运行参数	新生代	旧生代
+-XX:+UseSerialGC（Client模式默认值）	Serial	Serial Old
+-XX:+UseParNewGC	ParNew	Serial Old
+-XX:+UseConcMarkSweepGC	ParNew	CMS(Serial Old备用)
+-XX:+UseParallelGC（Server模式默认值）	Parallel Scavenge	Serial Old
+-XX:+UseParallelOldGC	Parallel Scavenge	Parallel Old
+
+二、性能调优
+2.1 性能调优的目的
+减少minor gc的频率、以及full gc的次数
+
+2.2 性能调优的手段
+1.使用JDK提供的内存查看工具，如JConsole和Java VisualVM
+2.控制堆内存各个部分所占的比例
+3.采用合适的垃圾收集器
+
+手段1：内存查看工具和GC日志分析
+n  -verbose.gc：显示GC的操作内容。打开它，可以显示最忙和最空闲收集行为发生的时间、收集前后的内存大小、收集需要的时间等。
+n  -xx:+printGCdetails：详细了解GC中的变化。
+n  -XX:+PrintGCTimeStamps：了解这些垃圾收集发生的时间，自JVM启动以后以秒计量。
+n  -xx:+PrintHeapAtGC：了解堆的更详细的信息。
+
+手段2：针对新生代和旧生代的比例
+如果新生代太小，会导致频繁GC，而且大对象对直接进入旧生代引发full gc
+如果新生代太大，会诱发旧生代full gc，而且新生代的gc耗时会延长
+建议新生代占整个堆1/3合适，相关JVM参数如下：
+n  -Xms:初始堆大小
+n  -Xmx:最大堆大小
+n  - Xmn:新生代大小
+n  -XX:PermSize=n:持久代最大值
+n  -XX:MaxPermSize=n:持久代最大值
+n  -XX:NewRatio=n:设置新生代和旧生代的比值。如:为3，表示新生代与旧生代比值为1：3，新生代占整个新生代旧生代和的1/4
+
+手段3：针对Eden和Survivor的比例
+如果Eden太小，会导致频繁GC
+如果Eden太大，会导致大对象直接进入旧生代，降低对象在新生代存活时间
+n  -XX:SurvivorRatio=n:新生代中Eden区与两个Survivor区的比值。注意Survivor区有两个。如：3，表示Eden：Survivor=3：2，一个Survivor区占整个年轻代的1/5
+n  -XX:PretenureSizeThreshold：直接进入旧生代中的对象大小，设置此值后，大于这个参数的对象将直接在旧生代中进行内存分配。
+n  -XX:MaxTenuringThreshold：对象转移到旧生代中的年龄，每个对象经历过一次新生代GC（Minor GC）后，年龄就加1，到超过设置的值后，对象转移到旧生代。
+
+手段4：采用正确的垃圾收集器
+通过JVM参数设置所使用的垃圾收集器参考前面的介绍，这里关注其他一些设置。
+并行收集器设置
+n  -XX:ParallelGCThreads=n:设置并行收集器收集时并行收集线程数
+n  -XX:MaxGCPauseMillis=n:设置并行收集最大暂停时间，仅对ParallelScavenge生效
+n  -XX:GCTimeRatio=n:设置垃圾回收时间占程序运行时间的百分比，仅对Parallel Scavenge生效
+ 
+并发收集器设置
+n  -XX:CMSInitiatingOccupancyFraction：默认设置下，CMS收集器在旧生代使用了68%的空间后就会被激活。此参数就是设置旧生代空间被使用多少后触发垃圾收集。注意要是CMS运行期间预留的内存无法满足程序需要，就会出现concurrent mode failure，这时候就会启用Serial Old收集器作为备用进行旧生代的垃圾收集。
+n  -XX:+UseCMSCompactAtFullCollection：空间碎片过多是标记-清除算法的弊端，此参数设置在FULL GC后再进行一个碎片整理过程
+n  -XX:CMSFullGCsBeforeCompaction：设置在若干次垃圾收集之后再启动一次内存碎片整理
